@@ -1,0 +1,184 @@
+
+// This #include statement was automatically added by the Particle IDE.
+#include "lib1.h"
+
+#include <Particle.h>
+#include "math.h"
+#include <Adafruit_10DOF_IMU.h>
+
+#define RESTRICT_PITCH
+
+Kalman kalmanX;
+Kalman kalmanY;
+
+char szInfo[100];
+int updateRate = 1000; //update rate for the sensors in milliseconds
+
+//IMU Global Variables
+float acX, acY, acZ, gyroX, gyroY, gyroZ, pitch, roll, heading, imuPress, imuAlt, imuTemp;
+
+float gyroXangle, gyroYangle; //Angle calculated using the gyro only
+float kalAngleX, kalAngleY; //Calculated angle using a kalman filter
+uint32_t Timer; 
+float RAD_TO_DEG = 57.2958;
+
+/* Get a new sensor event */
+sensors_event_t event;
+sensors_event_t accel_event;
+sensors_event_t mag_event;
+sensors_vec_t   orientation;
+
+//Set-up IMU
+Adafruit_10DOF                dof   = Adafruit_10DOF();
+Adafruit_LSM303_Accel_Unified accel = Adafruit_LSM303_Accel_Unified(30301);
+Adafruit_LSM303_Mag_Unified   mag   = Adafruit_LSM303_Mag_Unified(30302);
+Adafruit_BMP085_Unified       bmp   = Adafruit_BMP085_Unified(18001);
+Adafruit_L3GD20_Unified       gyro  = Adafruit_L3GD20_Unified(20);
+
+/* Update this with the correct SLP for accurate altitude measurements */
+//float seaLevelPressure = SENSORS_PRESSURE_SEALEVELHPA;
+
+//Ultrasonic Sensor Variables
+float cm;
+
+// Anything over 400 cm (23200 us pulse) is "out of range"
+const unsigned int MAX_DIST = 23200;
+
+
+void setup() {
+    
+  //Begin Diagnostics
+  Serial.begin(9600);
+  
+  /* Display the results (acceleration is measured in m/s^2) */
+  accel.getEvent(&event);
+  acX = event.acceleration.x;
+  acY = event.acceleration.y;
+  acZ = event.acceleration.z;
+  
+  /* Display the results (gyrocope values in rad/s) */
+  gyro.getEvent(&event);
+  gyroX = event.gyro.x;
+  gyroY = event.gyro.y;
+  gyroZ = event.gyro.z;  
+    
+  delay(100);
+  
+  #ifdef RESTRICT_PITCH 
+    roll = atan2(acY,acZ)*RAD_TO_DEG;
+    pitch = atan(-acX/sqrt(acY*acY + acZ*acZ));
+  #endif
+
+  kalmanX.setAngle(roll);
+  kalmanY.setAngle(pitch);
+  gyroXangle = roll;
+  gyroYangle = pitch;
+  
+  Timer = micros();
+}
+
+
+void loop() { 
+    
+    checkIMU();  //Gets IMU Values
+    
+    double dt = (double)(micros() - Timer) / 1000000;
+    Timer = micros();
+    
+    
+    #ifdef RESTRICT_PITCH // Eq. 25 and 26
+    roll  = atan2(acY, acZ) * RAD_TO_DEG;
+    pitch = atan(-acX / sqrt(acY * acY + acZ * acZ)) * RAD_TO_DEG;
+    #else // Eq. 28 and 29
+    roll  = atan(acY / sqrt(acX * acX + acZ * acZ)) * RAD_TO_DEG;
+    pitch = atan2(-acX, acZ) * RAD_TO_DEG;
+    #endif
+    
+    double gyroXrate = gyroX / 131.0;
+    double gyroYrate = gyroY / 131.0;
+    
+    #ifdef RESTRICT_PITCH
+    // This fixes the transition problem when the accelerometer angle jumps between -180 and 180 degrees
+    if ((roll < -90 && kalAngleX > 90) || (roll > 90 && kalAngleX < -90)) 
+    {
+      kalmanX.setAngle(roll);
+      kalAngleX = roll;
+      gyroXangle = roll;
+    } 
+    
+    else
+    kalAngleX = kalmanX.getAngle(roll, gyroXrate, dt); // Calculate the angle using a Kalman filter
+
+    if (abs(kalAngleX) > 90)
+       gyroYrate = -gyroYrate; // Invert rate, so it fits the restriced accelerometer reading
+       kalAngleY = kalmanY.getAngle(pitch, gyroYrate, dt);
+   #else
+   // This fixes the transition problem when the accelerometer angle jumps between -180 and 180 degrees
+  if ((pitch < -90 && kalAngleY > 90) || (pitch > 90 && kalAngleY < -90)) {
+    kalmanY.setAngle(pitch);
+    kalAngleY = pitch;
+    gyroYangle = pitch;
+  } else
+    kalAngleY = kalmanY.getAngle(pitch, gyroYrate, dt); // Calculate the angle using a Kalman filter
+
+  if (abs(kalAngleY) > 90)
+    gyroXrate = -gyroXrate; // Invert rate, so it fits the restriced accelerometer reading
+    kalAngleX = kalmanX.getAngle(roll, gyroXrate, dt); // Calculate the angle using a Kalman filter
+#endif
+
+  gyroXangle += gyroXrate * dt; // Calculate gyro angle without any filter
+  gyroYangle += gyroYrate * dt;
+    
+  // Reset the gyro angle when it has drifted too much
+  if (gyroXangle < -180 || gyroXangle > 180)
+     gyroXangle = kalAngleX;
+  if (gyroYangle < -180 || gyroYangle > 180)
+     gyroYangle = kalAngleY;
+    
+   
+  
+    Serial.println("accX:" );
+    Serial.print(acX);
+    Serial.println("accY:" );
+    Serial.print(acY);
+    Serial.println("accZ:" );
+    Serial.print(acZ);
+    Serial.println("gyroX: ");
+    Serial.print(gyroX);
+    Serial.println("gyroY: ");
+    Serial.print(gyroY);
+    Serial.println("gyroZ: ");
+    Serial.print(gyroZ);
+    Serial.println("Pitch: ");
+    Serial.print(pitch);
+    Serial.println("roll: ");
+    Serial.print(roll);
+    
+    Serial.println("gyroXangle: ");
+    Serial.print(gyroXangle);
+    Serial.println("gyroYangle: ");
+    Serial.print(gyroYangle);
+   
+    delay(updateRate);  //Loop Delay
+}
+
+void checkIMU(){
+     /* Get a new sensor event */
+  sensors_event_t event;
+  sensors_event_t accel_event;
+  sensors_event_t mag_event;
+  sensors_vec_t   orientation;
+   
+  /* Display the results (acceleration is measured in m/s^2) */
+  accel.getEvent(&event);
+  acX = event.acceleration.x;
+  acY = event.acceleration.y;
+  acZ = event.acceleration.z;
+  
+  /* Display the results (gyrocope values in rad/s) */
+  gyro.getEvent(&event);
+  gyroX = event.gyro.x;
+  gyroY = event.gyro.y;
+  gyroZ = event.gyro.z;  
+
+}
